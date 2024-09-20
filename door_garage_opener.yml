@@ -1,0 +1,207 @@
+#*******************************************************************************
+# ESP8266 based 
+# Upgrade to another smart garage door opener
+# Every time you press the button to open or close the garage door, it works as follows:
+# 1- Relay-1 operated for approx. 25s (this value can be set by using a slider in the Home Assistant) and connected the garage door system to the 220V supply.
+# 2- Relay-2 turn on for 2s and then turn off. It will trigger the garage door opener for opening or closing.
+# 3- Then after the specified time for e.g. 25s, everything is switched off until the next action.
+#
+# Forgani, Forghanain
+# initial 20 Sep. 2024
+# ******************************************************************************/
+substitutions:
+  device_name: "garage_door_system"
+  friendly_name: "garage-door"
+  device_description: "control the garage door"
+  log_level: "INFO" # "INFO" # "DEBUG"
+  
+esphome:
+  name: ${device_name}
+  platform: ESP8266
+  board: nodemcuv2
+  on_boot:
+    priority: 800
+    then:
+      - switch.turn_off: ${device_name}_voltage_relay
+      - switch.turn_off: ${device_name}_door_relay
+  
+# Enable logging
+logger:
+  level: ${log_level}
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+  
+wifi:
+  networks:
+    - ssid: !secret iot_wifi_ssid
+      password: !secret iot_wifi_password
+      # manual_ip:
+        # static_ip: !secret garage_door_system
+        # gateway: 192.168.178.1
+        # subnet: 255.255.255.0
+      
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret encryption
+
+captive_portal:
+
+status_led:
+  pin:
+    number: GPIO1 #D4
+
+
+# Get the WiFi details
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: ${device_name} IP Address
+      id: ${device_name}_ip
+    ssid:
+      name: ${device_name} SSID
+    mac_address:
+      name: ${device_name} Mac Address
+    
+sensor:
+  - platform: homeassistant
+    id: ${device_name}_voltage_slider
+    name: "Garage Voltage Slider"
+    entity_id: input_number.${device_name}_voltage_slider
+    internal: true
+   # WiFi Signal sensor.
+  - platform: wifi_signal
+    name: "${device_name} WiFi Signal Percent"
+    id: ${device_name}_wifi_signal
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+    unit_of_measurement: "Signal %"
+    entity_category: "diagnostic"
+    update_interval: 60s
+  - platform: uptime
+    type: seconds
+    name: ${device_name}_uptime
+script:
+  - id: ${device_name}_main_script
+    then:
+      - switch.turn_on: ${device_name}_voltage_relay
+      - switch.turn_on: ${device_name}_status_red_blinkend
+      - delay: 2s
+      - script.execute: ${device_name}_door_relay_script
+      - lambda: |-
+          if ( int(id(${device_name}_voltage_slider).state) < 9  or int(id(${device_name}_voltage_slider).state) > 30) {   
+            int(${device_name}_voltage_slider) = 10;
+          }
+      - delay: !lambda "return id(${device_name}_voltage_slider).state * 1000;"
+      - switch.turn_off: ${device_name}_voltage_relay
+      - switch.turn_off: ${device_name}_status_red_blinkend
+  # door_relay_script
+  - id: ${device_name}_door_relay_script
+    then:
+      - switch.turn_on: ${device_name}_door_relay
+      - delay: 2s
+      - switch.turn_off: ${device_name}_door_relay
+    
+# Switch object to control the relaies
+switch:
+  - platform: gpio
+    id: ${device_name}_status_red
+    pin: 
+      number: GPIO1 # D5
+      mode: output
+    name: "${device_name}_status_red"
+    internal: true
+  - platform: template
+    name: "${device_name} Automatik-LED blinkend"
+    optimistic: yes
+    id: ${device_name}_status_red_blinkend
+    turn_on_action:
+    - while: 
+        condition:
+        - lambda: 'return true;'
+        then:
+          - switch.turn_on: ${device_name}_status_red
+          - delay: 250ms
+          - switch.turn_off: ${device_name}_status_red
+          - delay: 250ms
+    turn_off_action:
+      - switch.turn_off: ${device_name}_status_red
+  - platform: gpio
+    name: "garage_voltage_relay"
+    id: ${device_name}_voltage_relay
+    pin: GPIO14  # D5
+    inverted: true
+    restore_mode: ALWAYS_OFF 
+    on_turn_on:
+      then:
+        - script.stop: ${device_name}_main_script
+        - script.execute: ${device_name}_main_script
+  # door relay
+  - platform: gpio
+    name: "${device_name} door relay"
+    id: ${device_name}_door_relay
+    pin: GPIO13  # D7
+    inverted: true
+    restore_mode: ALWAYS_OFF  
+    
+################ Reed-Contact                                 
+binary_sensor: 
+  - platform: gpio
+    name: "${device_name} Reed contact sensor"
+    device_class: garage_door
+    id: ${device_name}_reed_contact
+    pin:
+      number: GPIO2  # D4
+      mode: INPUT_PULLUP
+      #inverted: true
+  # remote_receiver
+  - platform: remote_receiver
+    name: ${device_name}_RF Button
+    rc_switch_raw:
+      protocol: 6
+      code: '110011101100100110111000'
+    on_press:
+      then:
+        - script.stop: ${device_name}_main_script
+        - script.execute: ${device_name}_main_script
+  - platform: gpio
+    pin:
+      number: GPIO3  # D3
+      mode: INPUT_PULLUP
+      #inverted: true
+    name: "${device_name} push Button"
+    on_press:
+      then:
+        - script.stop: ${device_name}_main_script
+        - script.execute: ${device_name}_main_script
+  # Connection status
+  - platform: status
+    name: ${device_name} Status
+     
+cover:
+  - platform: template
+    device_class: garage
+    name: "Garage Door"
+    lambda: "return id(${device_name}_reed_contact).state ? COVER_OPEN : COVER_CLOSED;"
+    open_action:
+      then:
+        - script.stop: ${device_name}_main_script
+        - script.execute: ${device_name}_main_script
+    close_action:
+      script.execute: ${device_name}_main_script
+
+################  rf - sensor.
+remote_receiver:
+  pin: 
+    number: GPIO01 # TX
+    mode:
+      input: true
+      pullup: true
+  dump: rc_switch # rc_switch # all raw
+  tolerance: 50% 
+  filter: 250us
+  idle: 4ms
+  buffer_size: 2kb
+  #  protocol=6 data='110011101100100110111000' CEC9B8  13552056
